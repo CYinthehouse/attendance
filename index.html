@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Attendance Webhook | KoreanLearnin</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: rgba(255,255,255,0.05);
+      border: 2px solid #00ffff;
+      border-radius: 20px;
+      padding: 40px;
+      max-width: 500px;
+      width: 100%;
+      text-align: center;
+    }
+    h1 { color: #00ffff; margin-bottom: 10px; }
+    .subtitle { color: #888; margin-bottom: 30px; }
+    .status { padding: 20px; border-radius: 10px; margin: 20px 0; }
+    .status.success { background: rgba(57,255,20,0.2); border: 1px solid #39ff14; color: #39ff14; }
+    .status.error { background: rgba(255,68,68,0.2); border: 1px solid #ff4444; color: #ff4444; }
+    .status.waiting { background: rgba(0,255,255,0.1); border: 1px solid #00ffff; color: #00ffff; }
+    .log { background: rgba(0,0,0,0.3); border-radius: 10px; padding: 15px; margin-top: 20px; text-align: left; max-height: 300px; overflow-y: auto; }
+    .log-entry { font-family: monospace; font-size: 12px; color: #888; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
+    .log-entry.success { color: #39ff14; }
+    .log-entry.error { color: #ff4444; }
+    .test-section { margin-top: 30px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
+    .test-section h3 { color: #ffaa00; margin-bottom: 15px; font-size: 14px; }
+    input { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 8px; border: 1px solid #444; background: rgba(0,0,0,0.3); color: #fff; }
+    button { padding: 12px 25px; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    .btn-primary { background: linear-gradient(135deg, #00ffff, #00aaff); color: #000; }
+    .btn-primary:hover { transform: translateY(-2px); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📡 Attendance Webhook</h1>
+    <p class="subtitle">Receives check-in data from Make.com</p>
+    
+    <div class="status waiting" id="status">
+      ⏳ Waiting for webhook calls...
+    </div>
+    
+    <div class="log" id="log">
+      <div class="log-entry">Webhook ready and listening...</div>
+    </div>
+    
+    <!-- Test Section -->
+    <div class="test-section">
+      <h3>🧪 Manual Test</h3>
+      <input type="text" id="testDiscordName" placeholder="Discord Name (e.g., JohnK#1234)">
+      <input type="text" id="testDiscordId" placeholder="Discord ID (e.g., 123456789012345678)">
+      <button class="btn-primary" onclick="testWebhook()">Send Test Check-in</button>
+    </div>
+  </div>
+
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  
+  <script>
+    // Firebase config
+    const firebaseConfig = {
+      apiKey: "AIzaSyDzI1_B49onrKJriy3er88O1KOJTLBzbYY",
+      authDomain: "korean-ta-evaluator.firebaseapp.com",
+      projectId: "korean-ta-evaluator",
+      storageBucket: "korean-ta-evaluator.firebasestorage.app",
+      messagingSenderId: "386010826708",
+      appId: "1:386010826708:web:d06d6fbdadce561b36b841"
+    };
+    
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    
+    // Get the Tuesday of the current week
+    function getWeekOf() {
+      const now = new Date();
+      const day = now.getDay();
+      const daysToTuesday = (day < 2) ? (day + 5) : (day - 2);
+      const tuesday = new Date(now);
+      tuesday.setDate(now.getDate() - daysToTuesday);
+      tuesday.setHours(0, 0, 0, 0);
+      return tuesday.toISOString().split('T')[0];
+    }
+    
+    // Add log entry
+    function addLog(message, type = '') {
+      const log = document.getElementById('log');
+      const entry = document.createElement('div');
+      entry.className = 'log-entry ' + type;
+      entry.textContent = new Date().toLocaleTimeString() + ' - ' + message;
+      log.insertBefore(entry, log.firstChild);
+    }
+    
+    // Update status
+    function setStatus(message, type) {
+      const status = document.getElementById('status');
+      status.className = 'status ' + type;
+      status.textContent = message;
+    }
+    
+    // Process check-in
+    async function processCheckin(discordName, discordId) {
+      if (!discordName) {
+        throw new Error('Discord name is required');
+      }
+      
+      const weekOf = getWeekOf();
+      addLog('Processing: ' + discordName + ' (ID: ' + (discordId || 'N/A') + ')');
+      
+      // Try to find student by discordName or discordId
+      let studentDoc = null;
+      let studentData = null;
+      
+      // First try by Discord ID (most reliable)
+      if (discordId) {
+        const idQuery = await db.collection('students').where('discordId', '==', discordId).limit(1).get();
+        if (!idQuery.empty) {
+          studentDoc = idQuery.docs[0];
+          studentData = studentDoc.data();
+          addLog('Found student by Discord ID: ' + (studentData.name || studentData.email));
+        }
+      }
+      
+      // If not found, try by Discord name
+      if (!studentDoc) {
+        const nameQuery = await db.collection('students').where('discordName', '==', discordName).limit(1).get();
+        if (!nameQuery.empty) {
+          studentDoc = nameQuery.docs[0];
+          studentData = studentDoc.data();
+          addLog('Found student by Discord name: ' + (studentData.name || studentData.email));
+          
+          // Update their discordId if we have it and they don't
+          if (discordId && !studentData.discordId) {
+            await db.collection('students').doc(studentDoc.id).update({ discordId: discordId });
+            addLog('Updated student with Discord ID');
+          }
+        }
+      }
+      
+      // Check if already checked in this week
+      const existingQuery = await db.collection('attendance_records')
+        .where('weekOf', '==', weekOf)
+        .where('discordName', '==', discordName)
+        .limit(1)
+        .get();
+      
+      if (!existingQuery.empty) {
+        addLog('Already checked in this week: ' + discordName, 'error');
+        return { success: true, message: 'Already checked in', duplicate: true };
+      }
+      
+      // Create attendance record
+      const record = {
+        discordName: discordName,
+        discordId: discordId || null,
+        weekOf: weekOf,
+        checkedInAt: firebase.firestore.FieldValue.serverTimestamp(),
+        confirmed: false,
+        confirmedAt: null,
+        source: 'discord'
+      };
+      
+      // If we found a matching student, add their info
+      if (studentDoc && studentData) {
+        record.studentId = studentDoc.id;
+        record.studentName = studentData.name || studentData.email || 'Unknown';
+        record.studentEmail = studentData.email || '';
+        record.matched = true;
+      } else {
+        // Unknown student - admin will need to link manually
+        record.studentId = null;
+        record.studentName = 'Unknown';
+        record.matched = false;
+        addLog('Student not found in database - needs manual linking', 'error');
+      }
+      
+      await db.collection('attendance_records').add(record);
+      addLog('Check-in recorded successfully!', 'success');
+      
+      return { 
+        success: true, 
+        message: record.matched ? 'Checked in: ' + record.studentName : 'Recorded (needs linking)',
+        matched: record.matched
+      };
+    }
+    
+    // Handle incoming webhook (for Make.com HTTP module)
+    // Make.com will call this page with query parameters or POST body
+    async function handleWebhook() {
+      // Check URL parameters (for GET requests)
+      const params = new URLSearchParams(window.location.search);
+      const discordName = params.get('discordName') || params.get('discord_name') || params.get('username');
+      const discordId = params.get('discordId') || params.get('discord_id') || params.get('id');
+      
+      if (discordName) {
+        addLog('Received webhook via URL params');
+        try {
+          const result = await processCheckin(discordName, discordId);
+          setStatus(result.duplicate ? '⚠️ Already checked in: ' + discordName : '✅ ' + result.message, result.duplicate ? 'error' : 'success');
+        } catch (error) {
+          setStatus('❌ Error: ' + error.message, 'error');
+          addLog('Error: ' + error.message, 'error');
+        }
+      }
+    }
+    
+    // Test function
+    async function testWebhook() {
+      const discordName = document.getElementById('testDiscordName').value.trim();
+      const discordId = document.getElementById('testDiscordId').value.trim();
+      
+      if (!discordName) {
+        alert('Please enter a Discord name');
+        return;
+      }
+      
+      setStatus('⏳ Processing...', 'waiting');
+      
+      try {
+        const result = await processCheckin(discordName, discordId);
+        setStatus(result.duplicate ? '⚠️ Already checked in' : '✅ ' + result.message, result.duplicate ? 'error' : 'success');
+      } catch (error) {
+        setStatus('❌ Error: ' + error.message, 'error');
+        addLog('Error: ' + error.message, 'error');
+      }
+    }
+    
+    // Initialize
+    handleWebhook();
+  </script>
+</body>
+</html>
